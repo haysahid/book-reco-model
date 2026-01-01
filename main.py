@@ -1,12 +1,17 @@
-import os
-import logging
-import shutil
-import pickle
-import pandas as pd
-from typing import Optional
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from surprise import Reader, SVD, Dataset, accuracy
+from datetime import datetime
 from surprise.model_selection import train_test_split
+from surprise import Reader, SVD, Dataset, accuracy
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from typing import Optional
+import pandas as pd
+import pickle
+import shutil
+import logging
+import os
+from model_db import init_db, save_model_history, get_model_history, set_active_model, get_active_model, get_model_by_id
+
+
+init_db()
 
 app = FastAPI(
     title="Sistem Rekomendasi Buku API",
@@ -21,16 +26,29 @@ os.makedirs(DATASET_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 
-def load_trained_model():
-    model_path = os.path.join(MODEL_DIR, "svd_model.pkl")
-    if os.path.exists(model_path):
+def load_model(model_path=None):
+    if model_path is None:
+        # Get active model
+        active_model = get_active_model()
+        if active_model:
+            model_path = os.path.join(
+                MODEL_DIR, active_model["model"]["filename"])
+        else:
+            # Get latest model
+            model = get_model_history(limit=1)
+            if not model:
+                return None
+            model_path = os.path.join(MODEL_DIR, model[0]["filename"])
+
+    if model_path and os.path.exists(model_path):
         with open(model_path, 'rb') as f:
             return pickle.load(f)
+
     return None
 
 
 # Global variable untuk menyimpan model yang sedang aktif
-model = load_trained_model()
+model = load_model()
 
 
 @app.post("/train", tags=["Model Training"])
@@ -119,15 +137,24 @@ async def train_model(
                     lr_all=lr_all, reg_all=reg_all, random_state=42)
         model.fit(full_trainset)
 
-        # Simpan ke file pickle
-        model_path = os.path.join(MODEL_DIR, "svd_model.pkl")
+        # Simpan model ke file dengan suffix tanggal
+        now = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_filename = f"svd_model_{now}.pkl"
+        model_path = os.path.join(MODEL_DIR, model_filename)
         with open(model_path, 'wb') as f:
             pickle.dump(model, f)
 
+        # Simpan metadata ke database (modul terpisah)
+        algorithm = "SVD"
+        model_metadata = save_model_history(model_filename, algorithm, n_factors, n_epochs,
+                                            lr_all, reg_all, float(rmse_score), float(mae_score))
+
+        # Perbarui model aktif
+        set_active_model(model_metadata["id"])
+
         return {
             "status": "Success",
-            "evaluation": {"rmse": round(rmse_score, 4), "mae": round(mae_score, 4)},
-            "config": {"n_factors": n_factors, "n_epochs": n_epochs}
+            "model": model_metadata
         }
 
     except Exception as e:
@@ -194,6 +221,56 @@ def get_recommendations(user_id: int, limit: int = 10):
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error saat memproses: {str(e)}")
+
+
+@app.get("/model-history", tags=["Model History"])
+def model_history(limit: int = 20):
+    """
+    Mengembalikan riwayat training model (maksimal 20 terakhir secara default).
+    """
+    models = get_model_history(limit)
+    return {"models": models}
+
+
+@app.post("/set-active-model/{model_history_id}", tags=["Model History"])
+def set_active(model_history_id: int):
+    """
+    Menetapkan model tertentu sebagai model aktif berdasarkan ID riwayat model.
+    """
+    try:
+        set_active_model(model_history_id)
+
+        # Reload model yang baru ditetapkan sebagai aktif
+        global model
+        model_data = get_model_by_id(model_history_id)
+        if model_data is None:
+            raise HTTPException(
+                status_code=404, detail="Model dengan ID tersebut tidak ditemukan.")
+
+        model_path = os.path.join(MODEL_DIR, model_data["filename"])
+        if not os.path.exists(model_path):
+            raise HTTPException(
+                status_code=404, detail="File model tidak ditemukan di server.")
+
+        # Muat ulang model dari file yang baru ditetapkan sebagai aktif
+        model = load_model(model_path)
+
+        return {"status": "Success", "message": f"Model dengan ID {model_history_id} telah ditetapkan sebagai aktif."}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Gagal menetapkan model aktif: {str(e)}")
+
+
+@app.get("/active-model", tags=["Model History"])
+def active_model():
+    """
+    Mengembalikan informasi model yang sedang aktif digunakan.
+    """
+    active = get_active_model()
+    if active is None:
+        raise HTTPException(
+            status_code=404, detail="Tidak ada model aktif saat ini.")
+    return {"active_model": active}
 
 
 if __name__ == "__main__":

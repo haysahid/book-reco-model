@@ -39,3 +39,4 @@ instance/
 # Generated files
 datasets/
 models/
+*.db
