@@ -1,14 +1,16 @@
-from datetime import datetime
-from surprise.model_selection import train_test_split
-from surprise import Reader, SVD, Dataset, accuracy
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from typing import Optional
-import pandas as pd
-import pickle
-import shutil
-import logging
-import os
 from model_db import init_db, save_model_history, get_model_history, set_active_model, get_active_model, get_model_by_id
+import os
+import logging
+import json
+import shutil
+import pickle
+import pandas as pd
+from typing import Optional
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from surprise import Reader, SVD, Dataset, accuracy
+from surprise.model_selection import train_test_split
+from datetime import datetime
+from surprise.model_selection import GridSearchCV
 
 
 init_db()
@@ -111,7 +113,7 @@ async def train_model(
                 "Dataset kosong setelah digabungkan. Pastikan ID buku di kedua file cocok.")
 
         # 3. Setup Dataset Surprise
-        reader = Reader(rating_scale=(1, 5))
+        reader = Reader(rating_scale=(1, 3))
         data = Dataset.load_from_df(
             data_reco[['user_id', 'book_id', 'quantity']], reader)
 
@@ -160,6 +162,84 @@ async def train_model(
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Gagal melatih model: {str(e)}")
+
+
+def tuning_model(data_reco, param_grid: dict[str, list] = None, cv=3, n_jobs=-1):
+    """
+    Melakukan grid search hyperparameter SVD menggunakan Surprise GridSearchCV.
+    data_reco: DataFrame dengan kolom ['user_id', 'book_id', 'quantity']
+    param_grid: dict parameter grid
+    cv: jumlah cross-validation folds
+    n_jobs: paralel jobs
+    """
+    if param_grid is None:
+        param_grid = {
+            'n_epochs': [5, 10, 20],
+            'lr_all': [0.002, 0.005, 0.007],
+        }
+
+    logging.info(
+        f"Parameter grid untuk tuning: {param_grid}, CV: {cv}, n_jobs: {n_jobs}")
+
+    reader = Reader(rating_scale=(1, 3))
+    data = Dataset.load_from_df(
+        data_reco[['user_id', 'book_id', 'quantity']], reader)
+    gs = GridSearchCV(SVD, param_grid, measures=[
+                      'rmse', 'mae'], cv=cv, n_jobs=n_jobs, joblib_verbose=1)
+    gs.fit(data)
+
+    return {
+        'best_params': gs.best_params['rmse'],
+        'best_score_rmse': gs.best_score['rmse'],
+        'best_score_mae': gs.best_score['mae'],
+        'config': {
+            'param_grid': param_grid,
+            'cv': cv,
+            'n_jobs': n_jobs
+        },
+        'cv_results': {k: v.tolist() if hasattr(v, "tolist") else v for k, v in gs.cv_results.items()},
+    }
+
+
+@app.post("/tune", tags=["Model Tuning"])
+async def tune_model(
+    books_file: UploadFile = File(
+        ..., description="File Excel berisi daftar buku (kolom: id, title, author)"),
+    transactions_file: UploadFile = File(
+        ..., description="File Excel transaksi (kolom: user_id, book_id, quantity)"),
+    param_grid: Optional[str] = Form(
+        None, description="Parameter grid dalam format JSON"),
+    cv: int = Form(3, description="Jumlah cross-validation folds"),
+    n_jobs: int = Form(-1, description="Jumlah pekerjaan paralel")
+):
+    """
+    Endpoint untuk tuning hyperparameter SVD dengan grid search.
+    """
+    try:
+        if param_grid:
+            param_grid = json.loads(param_grid)
+
+        # Simpan file sementara
+        books_path = os.path.join(DATASET_DIR, "books.xlsx")
+        trans_path = os.path.join(DATASET_DIR, "transaction_items.xlsx")
+        with open(books_path, "wb") as buffer:
+            shutil.copyfileobj(books_file.file, buffer)
+        with open(trans_path, "wb") as buffer:
+            shutil.copyfileobj(transactions_file.file, buffer)
+        df_books = pd.read_excel(books_path)
+        df_trans = pd.read_excel(trans_path)
+        df_books.rename(columns={"id": "book_id"}, inplace=True)
+        df_trans.rename(columns={"id": "transaction_item_id"}, inplace=True)
+        df = df_books.merge(df_trans, how="left", left_on="book_id",
+                            right_on="book_id", validate="one_to_many")
+        data_reco = df[['user_id', 'book_id', 'quantity']].dropna()
+        if data_reco.empty:
+            raise ValueError(
+                "Dataset kosong setelah digabungkan. Pastikan ID buku di kedua file cocok.")
+        result = tuning_model(data_reco, param_grid, cv, n_jobs)
+        return {"status": "Success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Tuning gagal: {str(e)}")
 
 
 @app.get("/recommend/{user_id}", tags=["Recommendation"])
