@@ -1,4 +1,5 @@
 import os
+import logging
 import shutil
 import pickle
 import pandas as pd
@@ -12,16 +13,18 @@ app = FastAPI(
     description="Backend untuk training SVD dan prediksi rekomendasi buku dengan fitur Cold Start."
 )
 
-MODEL_PATH = "svd_model.pkl"
-UPLOAD_DIR = "datasets"
+MODEL_DIR = "models"
+DATASET_DIR = "datasets"
 
 # Buat folder dataset jika belum ada
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(DATASET_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 
 def load_trained_model():
-    if os.path.exists(MODEL_PATH):
-        with open(MODEL_PATH, 'rb') as f:
+    model_path = os.path.join(MODEL_DIR, "svd_model.pkl")
+    if os.path.exists(model_path):
+        with open(model_path, 'rb') as f:
             return pickle.load(f)
     return None
 
@@ -41,29 +44,51 @@ async def train_model(
     lr_all: float = Form(0.005, description="Learning rate"),
     reg_all: float = Form(0.02, description="Regularization term")
 ):
+    logging.info("Menerima permintaan training model baru.")
+
     """
     Endpoint untuk mengunggah dataset baru, melakukan training, dan evaluasi model.
     """
     try:
+        logging.info("Memulai proses training model...")
+
         # 1. Simpan File ke Lokal
-        books_path = os.path.join(UPLOAD_DIR, "books.xlsx")
-        trans_path = os.path.join(UPLOAD_DIR, "transaction_items.xlsx")
+        books_path = os.path.join(DATASET_DIR, "books.xlsx")
+        trans_path = os.path.join(DATASET_DIR, "transaction_items.xlsx")
 
         with open(books_path, "wb") as buffer:
             shutil.copyfileobj(books_file.file, buffer)
         with open(trans_path, "wb") as buffer:
             shutil.copyfileobj(transactions_file.file, buffer)
 
+        logging.info("File dataset berhasil disimpan.")
+
         # 2. Persiapan Data
         df_books = pd.read_excel(books_path)
         df_trans = pd.read_excel(trans_path)
 
+        df_books.drop(columns=['no'])
+        df_trans.drop(columns=['no'])
+
+        # Ganti nama kolom id untuk menghindari konflik
+        df_books.rename(columns={"id": "book_id"}, inplace=True)
+        df_trans.rename(columns={"id": "transaction_item_id"}, inplace=True)
+
+        logging.info("Dataset berhasil dimuat ke DataFrame.")
+        # Tampilkan struktur data untuk debugging
+        logging.info(f"Books DataFrame columns: {df_books.columns.tolist()}")
+        logging.info(
+            f"Transactions DataFrame columns: {df_trans.columns.tolist()}")
+
         # Gabungkan data untuk validasi awal
         df = df_books.merge(df_trans, how="left",
-                            left_on="id", right_on="book_id")
+                            left_on="book_id", right_on="book_id", validate="one_to_many")
         data_reco = df[['user_id', 'book_id', 'quantity']].dropna()
 
+        logging.info("Data gabungan untuk training disiapkan.")
+
         if data_reco.empty:
+            logging.error("Dataset kosong setelah digabungkan.")
             raise ValueError(
                 "Dataset kosong setelah digabungkan. Pastikan ID buku di kedua file cocok.")
 
@@ -71,6 +96,8 @@ async def train_model(
         reader = Reader(rating_scale=(1, 5))
         data = Dataset.load_from_df(
             data_reco[['user_id', 'book_id', 'quantity']], reader)
+
+        logging.info("Memulai training model SVD...")
 
         # 4. Evaluasi Model (Hold-out Validation)
         trainset_eval, testset_eval = train_test_split(
@@ -83,6 +110,8 @@ async def train_model(
         rmse_score = accuracy.rmse(predictions, verbose=False)
         mae_score = accuracy.mae(predictions, verbose=False)
 
+        logging.info(f"Evaluasi Model - RMSE: {rmse_score}, MAE: {mae_score}")
+
         # 5. Training Final pada Seluruh Data
         full_trainset = data.build_full_trainset()
         global model
@@ -91,7 +120,8 @@ async def train_model(
         model.fit(full_trainset)
 
         # Simpan ke file pickle
-        with open(MODEL_PATH, 'wb') as f:
+        model_path = os.path.join(MODEL_DIR, "svd_model.pkl")
+        with open(model_path, 'wb') as f:
             pickle.dump(model, f)
 
         return {
@@ -105,8 +135,8 @@ async def train_model(
             status_code=500, detail=f"Gagal melatih model: {str(e)}")
 
 
-@app.get("/recommendations/{user_id}", tags=["Recommendation"])
-def get_recommendations(user_id: int, n: int = 10):
+@app.get("/recommend/{user_id}", tags=["Recommendation"])
+def get_recommendations(user_id: int, limit: int = 10):
     """
     Memberikan rekomendasi buku. Menggunakan SVD untuk user lama 
     dan Popularitas (Cold Start) untuk user baru.
@@ -117,9 +147,9 @@ def get_recommendations(user_id: int, n: int = 10):
 
     try:
         # Load dataset dari penyimpanan lokal
-        df_books = pd.read_excel(os.path.join(UPLOAD_DIR, "books.xlsx"))
+        df_books = pd.read_excel(os.path.join(DATASET_DIR, "books.xlsx"))
         df_trans = pd.read_excel(os.path.join(
-            UPLOAD_DIR, "transaction_items.xlsx"))
+            DATASET_DIR, "transaction_items.xlsx"))
 
         user_history = df_trans[df_trans['user_id'] == user_id]
 
@@ -128,7 +158,7 @@ def get_recommendations(user_id: int, n: int = 10):
             popular_books = df_trans.groupby(
                 'book_id')['quantity'].sum().reset_index()
             popular_ids = popular_books.sort_values(
-                by='quantity', ascending=False).head(n)['book_id'].tolist()
+                by='quantity', ascending=False).head(limit)['book_id'].tolist()
 
             reco_list = []
             for b_id in popular_ids:
@@ -149,7 +179,7 @@ def get_recommendations(user_id: int, n: int = 10):
             preds.append((b_id, model.predict(user_id, b_id).est))
 
         preds.sort(key=lambda x: x[1], reverse=True)
-        top_n = preds[:n]
+        top_n = preds[:limit]
 
         reco_list = []
         for b_id, score in top_n:
@@ -168,4 +198,17 @@ def get_recommendations(user_id: int, n: int = 10):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    # Reconfigure logging to ensure output appears in terminal
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
+    logging.info("Starting FastAPI app with Uvicorn...")
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )

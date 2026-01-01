@@ -35,3 +35,7 @@ instance/
 # IDEs and editors
 .idea/ # JetBrains IDEs
 .vscode/ # VS Code
+
+# Generated files
+datasets/
+models/
