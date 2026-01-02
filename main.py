@@ -1,4 +1,5 @@
-from model_db import init_db, save_model_history, get_model_history, set_active_model, get_active_model, get_model_by_id
+from model_db import (init_db, save_model_history, get_model_history,
+                      set_active_model, get_active_model, get_model_by_id, delete_model_history)
 import os
 import logging
 import json
@@ -351,6 +352,32 @@ def active_model():
         raise HTTPException(
             status_code=404, detail="Tidak ada model aktif saat ini.")
     return {"active_model": active}
+
+# Delete model
+
+
+@app.delete("/model-history/{model_history_id}", tags=["Model History"])
+def delete_model(model_history_id: int):
+    """
+    Menghapus model dari riwayat berdasarkan ID riwayat model.
+    """
+    try:
+        model_data = get_model_by_id(model_history_id)
+        if model_data is None:
+            raise HTTPException(
+                status_code=404, detail="Model dengan ID tersebut tidak ditemukan.")
+
+        model_path = os.path.join(MODEL_DIR, model_data["filename"])
+        if os.path.exists(model_path):
+            os.remove(model_path)
+
+        # Hapus dari database
+        delete_model_history(model_history_id)
+
+        return {"status": "Success", "message": f"Model dengan ID {model_history_id} telah dihapus."}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Gagal menghapus model: {str(e)}")
 
 
 if __name__ == "__main__":

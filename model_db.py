@@ -1,4 +1,3 @@
-# Fungsi untuk set model aktif
 import os
 from datetime import datetime
 import sqlite3
@@ -152,6 +151,32 @@ def get_active_model():
             }
         }
     return None
+
+
+def delete_model_history(model_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    active_model = get_active_model()
+    if active_model and active_model['model_history_id'] == model_id:
+        c.execute('''SELECT id FROM model_histories
+                     WHERE id != ?
+                     ORDER BY id DESC LIMIT 1''', (model_id,))
+        row = c.fetchone()
+        if row:
+            new_active_id = row[0]
+            c.execute('DELETE FROM active_model')
+            c.execute('INSERT INTO active_model (model_history_id) VALUES (?)',
+                      (new_active_id,))
+        else:
+            c.execute('DELETE FROM active_model')
+
+    c.execute('DELETE FROM model_histories WHERE id = ?', (model_id,))
+
+    conn.commit()
+    affected_rows = c.rowcount
+    conn.close()
+    return affected_rows > 0
 
 
 def delete_db():
