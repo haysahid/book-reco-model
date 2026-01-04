@@ -9,6 +9,7 @@ DB_PATH = "model_history.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Tambahkan kolom reference jika belum ada
     c.execute('''
         CREATE TABLE IF NOT EXISTS model_histories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,9 +21,15 @@ def init_db():
             reg_all REAL,
             rmse REAL,
             mae REAL,
+            reference TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Alter table jika kolom reference belum ada (untuk migrasi)
+    try:
+        c.execute('ALTER TABLE model_histories ADD COLUMN reference TEXT')
+    except sqlite3.OperationalError:
+        pass  # Kolom sudah ada
     c.execute('''
         CREATE TABLE IF NOT EXISTS active_model (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,17 +42,17 @@ def init_db():
     conn.close()
 
 
-def save_model_history(filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae):
+def save_model_history(filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae, reference):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''INSERT INTO model_histories (filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-              (filename, algorithm, n_factors, n_epochs, lr_all, reg_all, float(rmse), float(mae)))
+    c.execute('''INSERT INTO model_histories (filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae, reference)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+              (filename, algorithm, n_factors, n_epochs, lr_all, reg_all, float(rmse), float(mae), reference))
     conn.commit()
 
     # Retrieve the last inserted record
     last_id = c.lastrowid
-    c.execute('''SELECT id, filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae, created_at
+    c.execute('''SELECT id, filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae, reference, created_at
                  FROM model_histories WHERE id = ?''', (last_id,))
     row = c.fetchone()
     conn.close()
@@ -60,7 +67,8 @@ def save_model_history(filename, algorithm, n_factors, n_epochs, lr_all, reg_all
             "reg_all": row[6],
             "rmse": row[7],
             "mae": row[8],
-            "created_at": row[9],
+            "reference": row[9],
+            "created_at": row[10],
         }
     return None
 
@@ -68,7 +76,7 @@ def save_model_history(filename, algorithm, n_factors, n_epochs, lr_all, reg_all
 def get_model_history(limit=20):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''SELECT id, filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae, created_at
+    c.execute('''SELECT id, filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae, reference, created_at
                  FROM model_histories ORDER BY id DESC LIMIT ?''', (limit,))
     rows = c.fetchall()
     conn.close()
@@ -84,7 +92,8 @@ def get_model_history(limit=20):
             "reg_all": row[6],
             "rmse": row[7],
             "mae": row[8],
-            "created_at": row[9],
+            "reference": row[9],
+            "created_at": row[10],
         })
     return history
 
@@ -92,7 +101,7 @@ def get_model_history(limit=20):
 def get_model_by_id(model_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''SELECT id, filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae, created_at
+    c.execute('''SELECT id, filename, algorithm, n_factors, n_epochs, lr_all, reg_all, rmse, mae, reference, created_at
                  FROM model_histories WHERE id = ?''', (model_id,))
     row = c.fetchone()
     conn.close()
@@ -107,7 +116,8 @@ def get_model_by_id(model_id):
             "reg_all": row[6],
             "rmse": row[7],
             "mae": row[8],
-            "created_at": row[9],
+            "reference": row[9],
+            "created_at": row[10],
         }
     return None
 
@@ -127,7 +137,7 @@ def get_active_model():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''SELECT am.model_history_id, am.set_at,
-                        mh.id, mh.filename, mh.algorithm, mh.n_factors, mh.n_epochs, mh.lr_all, mh.reg_all, mh.rmse, mh.mae, mh.created_at
+                        mh.id, mh.filename, mh.algorithm, mh.n_factors, mh.n_epochs, mh.lr_all, mh.reg_all, mh.rmse, mh.mae, mh.reference, mh.created_at
                  FROM active_model am
                  JOIN model_histories mh ON am.model_history_id = mh.id
                  ORDER BY am.set_at DESC LIMIT 1''')
@@ -147,7 +157,8 @@ def get_active_model():
                 "reg_all": row[8],
                 "rmse": row[9],
                 "mae": row[10],
-                "created_at": row[11],
+                "reference": row[11],
+                "created_at": row[12],
             }
         }
     return None

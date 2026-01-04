@@ -59,13 +59,15 @@ async def train_model(
     books_file: UploadFile = File(
         ..., description="File Excel berisi daftar buku (kolom: id, title, author)"),
     transactions_file: UploadFile = File(
-        ..., description="File Excel transaksi (kolom: user_id, book_id, quantity)"),
+        ..., description="File Excel transaksi (kolom: user_id, book_id, quantity, rating)"),
     n_factors: int = Form(100, description="Jumlah faktor laten"),
     n_epochs: int = Form(20, description="Jumlah iterasi training"),
     lr_all: float = Form(0.005, description="Learning rate"),
-    reg_all: float = Form(0.02, description="Regularization term")
+    reg_all: float = Form(0.02, description="Regularization term"),
+    reference: str = Form(
+        "rating", description="Referensi rekomendasi: 'rating' atau 'transaction'")
 ):
-    logging.info("Menerima permintaan training model baru.")
+    logging.info(f"Menerima permintaan training model baru: {reference}")
 
     """
     Endpoint untuk mengunggah dataset baru, melakukan training, dan evaluasi model.
@@ -104,9 +106,18 @@ async def train_model(
         # Gabungkan data untuk validasi awal
         df = df_books.merge(df_trans, how="left",
                             left_on="book_id", right_on="book_id", validate="one_to_many")
-        data_reco = df[['user_id', 'book_id', 'quantity']].dropna()
+        # Pilih kolom target sesuai reference
+        if reference == "transaction":
+            target_col = "quantity"
+        else:
+            target_col = "rating"
+        if target_col not in df.columns:
+            raise ValueError(
+                f"Kolom {target_col} tidak ditemukan pada data transaksi.")
+        data_reco = df[['user_id', 'book_id', target_col]].dropna()
 
-        logging.info("Data gabungan untuk training disiapkan.")
+        logging.info(
+            f"Data gabungan untuk training disiapkan dengan tipe: {reference}.")
 
         if data_reco.empty:
             logging.error("Dataset kosong setelah digabungkan.")
@@ -114,9 +125,15 @@ async def train_model(
                 "Dataset kosong setelah digabungkan. Pastikan ID buku di kedua file cocok.")
 
         # 3. Setup Dataset Surprise
-        reader = Reader(rating_scale=(1, 3))
+        # Untuk transaksi, rating_scale bisa disesuaikan jika perlu
+        if reference == "transaction":
+            min_val = int(data_reco[target_col].min())
+            max_val = int(data_reco[target_col].max())
+            reader = Reader(rating_scale=(min_val, max_val))
+        else:
+            reader = Reader(rating_scale=(1, 5))
         data = Dataset.load_from_df(
-            data_reco[['user_id', 'book_id', 'quantity']], reader)
+            data_reco[['user_id', 'book_id', target_col]], reader)
 
         logging.info("Memulai training model SVD...")
 
@@ -150,7 +167,7 @@ async def train_model(
         # Simpan metadata ke database (modul terpisah)
         algorithm = "SVD"
         model_metadata = save_model_history(model_filename, algorithm, n_factors, n_epochs,
-                                            lr_all, reg_all, float(rmse_score), float(mae_score))
+                                            lr_all, reg_all, float(rmse_score), float(mae_score), reference)
 
         # Perbarui model aktif
         set_active_model(model_metadata["id"])
@@ -165,13 +182,14 @@ async def train_model(
             status_code=500, detail=f"Gagal melatih model: {str(e)}")
 
 
-def tuning_model(data_reco, param_grid: dict[str, list] = None, cv=3, n_jobs=-1):
+def tuning_model(data_reco, param_grid: dict[str, list] = None, cv=3, n_jobs=-1, reference: str = "rating"):
     """
     Melakukan grid search hyperparameter SVD menggunakan Surprise GridSearchCV.
-    data_reco: DataFrame dengan kolom ['user_id', 'book_id', 'quantity']
+    data_reco: DataFrame dengan kolom ['user_id', 'book_id', 'quantity', 'rating']
     param_grid: dict parameter grid
     cv: jumlah cross-validation folds
     n_jobs: paralel jobs
+    reference: referensi rekomendasi ('rating' atau 'transaksi')
     """
     if param_grid is None:
         param_grid = {
@@ -180,11 +198,18 @@ def tuning_model(data_reco, param_grid: dict[str, list] = None, cv=3, n_jobs=-1)
         }
 
     logging.info(
-        f"Parameter grid untuk tuning: {param_grid}, CV: {cv}, n_jobs: {n_jobs}")
+        f"Parameter grid untuk tuning: {param_grid}, CV: {cv}, n_jobs: {n_jobs}, reference: {reference}")
 
-    reader = Reader(rating_scale=(1, 3))
+    if reference == "transaction":
+        target_col = "quantity"
+        min_val = int(data_reco[target_col].min())
+        max_val = int(data_reco[target_col].max())
+        reader = Reader(rating_scale=(min_val, max_val))
+    else:
+        target_col = "rating"
+        reader = Reader(rating_scale=(1, 5))
     data = Dataset.load_from_df(
-        data_reco[['user_id', 'book_id', 'quantity']], reader)
+        data_reco[['user_id', 'book_id', target_col]], reader)
     gs = GridSearchCV(SVD, param_grid, measures=[
                       'rmse', 'mae'], cv=cv, n_jobs=n_jobs, joblib_verbose=1)
     gs.fit(data)
@@ -196,7 +221,8 @@ def tuning_model(data_reco, param_grid: dict[str, list] = None, cv=3, n_jobs=-1)
         'config': {
             'param_grid': param_grid,
             'cv': cv,
-            'n_jobs': n_jobs
+            'n_jobs': n_jobs,
+            'reference': reference
         },
         'cv_results': {k: v.tolist() if hasattr(v, "tolist") else v for k, v in gs.cv_results.items()},
     }
@@ -207,11 +233,13 @@ async def tune_model(
     books_file: UploadFile = File(
         ..., description="File Excel berisi daftar buku (kolom: id, title, author)"),
     transactions_file: UploadFile = File(
-        ..., description="File Excel transaksi (kolom: user_id, book_id, quantity)"),
+        ..., description="File Excel transaksi (kolom: user_id, book_id, 'quantity', rating)"),
     param_grid: Optional[str] = Form(
         None, description="Parameter grid dalam format JSON"),
     cv: int = Form(3, description="Jumlah cross-validation folds"),
-    n_jobs: int = Form(-1, description="Jumlah pekerjaan paralel")
+    n_jobs: int = Form(-1, description="Jumlah pekerjaan paralel"),
+    reference: str = Form(
+        "rating", description="Referensi rekomendasi: 'rating' atau 'transaksi'")
 ):
     """
     Endpoint untuk tuning hyperparameter SVD dengan grid search.
@@ -233,11 +261,19 @@ async def tune_model(
         df_trans.rename(columns={"id": "transaction_item_id"}, inplace=True)
         df = df_books.merge(df_trans, how="left", left_on="book_id",
                             right_on="book_id", validate="one_to_many")
-        data_reco = df[['user_id', 'book_id', 'quantity']].dropna()
+        # Pilih kolom target sesuai reference
+        if reference == "transaction":
+            target_col = "quantity"
+        else:
+            target_col = "rating"
+        if target_col not in df.columns:
+            raise ValueError(
+                f"Kolom {target_col} tidak ditemukan pada data transaksi.")
+        data_reco = df[['user_id', 'book_id', target_col]].dropna()
         if data_reco.empty:
             raise ValueError(
                 "Dataset kosong setelah digabungkan. Pastikan ID buku di kedua file cocok.")
-        result = tuning_model(data_reco, param_grid, cv, n_jobs)
+        result = tuning_model(data_reco, param_grid, cv, n_jobs, reference)
         return {"status": "Success", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Tuning gagal: {str(e)}")
@@ -264,9 +300,9 @@ def get_recommendations(user_id: int, limit: int = 10):
         # LOGIKA COLD START (User Baru)
         if user_history.empty:
             popular_books = df_trans.groupby(
-                'book_id')['quantity'].sum().reset_index()
+                'book_id')['rating'].sum().reset_index()
             popular_ids = popular_books.sort_values(
-                by='quantity', ascending=False).head(limit)['book_id'].tolist()
+                by='rating', ascending=False).head(limit)['book_id'].tolist()
 
             reco_list = []
             for b_id in popular_ids:
