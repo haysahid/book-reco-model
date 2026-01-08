@@ -65,7 +65,8 @@ async def train_model(
     lr_all: float = Form(0.005, description="Learning rate"),
     reg_all: float = Form(0.02, description="Regularization term"),
     reference: str = Form(
-        "rating", description="Referensi rekomendasi: 'rating' atau 'transaction'")
+        "rating", description="Referensi rekomendasi: 'rating' atau 'transaction'"),
+    created_by: str = Form("manual", description="Penanda model dibuat oleh siapa: 'manual' atau 'auto'")
 ):
     logging.info(f"Menerima permintaan training model baru: {reference}")
 
@@ -164,10 +165,11 @@ async def train_model(
         with open(model_path, 'wb') as f:
             pickle.dump(model, f)
 
+
         # Simpan metadata ke database (modul terpisah)
         algorithm = "SVD"
         model_metadata = save_model_history(model_filename, algorithm, n_factors, n_epochs,
-                                            lr_all, reg_all, float(rmse_score), float(mae_score), reference)
+                            lr_all, reg_all, float(rmse_score), float(mae_score), reference, created_by)
 
         # Perbarui model aktif
         set_active_model(model_metadata["id"])
