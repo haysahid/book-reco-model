@@ -66,7 +66,8 @@ async def train_model(
     reg_all: float = Form(0.02, description="Regularization term"),
     reference: str = Form(
         "rating", description="Referensi rekomendasi: 'rating' atau 'transaction'"),
-    created_by: str = Form("manual", description="Penanda model dibuat oleh siapa: 'manual' atau 'auto'")
+    created_by: str = Form(
+        "manual", description="Penanda model dibuat oleh siapa: 'manual' atau 'auto'")
 ):
     logging.info(f"Menerima permintaan training model baru: {reference}")
 
@@ -127,12 +128,18 @@ async def train_model(
 
         # 3. Setup Dataset Surprise
         # Untuk transaksi, rating_scale bisa disesuaikan jika perlu
+        min_value = None
+        max_value = None
+
         if reference == "transaction":
-            min_val = int(data_reco[target_col].min())
-            max_val = int(data_reco[target_col].max())
-            reader = Reader(rating_scale=(min_val, max_val))
+            min_value = int(data_reco[target_col].min())
+            max_value = int(data_reco[target_col].max())
+            reader = Reader(rating_scale=(min_value, max_value))
         else:
-            reader = Reader(rating_scale=(1, 5))
+            min_value = 1
+            max_value = 5
+            reader = Reader(rating_scale=(min_value, max_value))
+
         data = Dataset.load_from_df(
             data_reco[['user_id', 'book_id', target_col]], reader)
 
@@ -165,11 +172,10 @@ async def train_model(
         with open(model_path, 'wb') as f:
             pickle.dump(model, f)
 
-
         # Simpan metadata ke database (modul terpisah)
         algorithm = "SVD"
         model_metadata = save_model_history(model_filename, algorithm, n_factors, n_epochs,
-                            lr_all, reg_all, float(rmse_score), float(mae_score), reference, created_by)
+                                            lr_all, reg_all, float(rmse_score), float(mae_score), min_value, max_value, reference, created_by)
 
         # Perbarui model aktif
         set_active_model(model_metadata["id"])
@@ -202,16 +208,23 @@ def tuning_model(data_reco, param_grid: dict[str, list] = None, cv=3, n_jobs=-1,
     logging.info(
         f"Parameter grid untuk tuning: {param_grid}, CV: {cv}, n_jobs: {n_jobs}, reference: {reference}")
 
+    min_value = None
+    max_value = None
+
     if reference == "transaction":
         target_col = "quantity"
-        min_val = int(data_reco[target_col].min())
-        max_val = int(data_reco[target_col].max())
-        reader = Reader(rating_scale=(min_val, max_val))
+        min_value = int(data_reco[target_col].min())
+        max_value = int(data_reco[target_col].max())
+        reader = Reader(rating_scale=(min_value, max_value))
     else:
         target_col = "rating"
-        reader = Reader(rating_scale=(1, 5))
+        min_value = 1
+        max_value = 5
+        reader = Reader(rating_scale=(min_value, max_value))
+
     data = Dataset.load_from_df(
         data_reco[['user_id', 'book_id', target_col]], reader)
+
     gs = GridSearchCV(SVD, param_grid, measures=[
                       'rmse', 'mae'], cv=cv, n_jobs=n_jobs, joblib_verbose=1)
     gs.fit(data)
@@ -220,6 +233,8 @@ def tuning_model(data_reco, param_grid: dict[str, list] = None, cv=3, n_jobs=-1,
         'best_params': gs.best_params['rmse'],
         'best_score_rmse': gs.best_score['rmse'],
         'best_score_mae': gs.best_score['mae'],
+        'min_value': min_value,
+        'max_value': max_value,
         'config': {
             'param_grid': param_grid,
             'cv': cv,
