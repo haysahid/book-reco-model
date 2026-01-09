@@ -23,6 +23,7 @@ uvicorn
 pandas
 scikit-surprise
 openpyxl
+python-multipart
 ```
 
 You can install with:
@@ -30,10 +31,14 @@ You can install with:
 ```bash
 python -m venv venv
 source venv/bin/activate
-pip install fastapi uvicorn pandas scikit-surprise openpyxl
+pip install fastapi uvicorn pandas scikit-surprise openpyxl python-multipart
 ```
 
-Note: `scikit-surprise` may require a C compiler on some platforms. See Surprise installation docs if you encounter build issues.
+Note: `scikit-surprise` may require a C compiler on some platforms. See Surprise installation docs if you encounter build issues. If numpy version is too new, consider downgrading to a compatible version (e.g., `numpy<2.0`). Example:
+
+```bash
+pip install "numpy<2.0"
+```
 
 ## Run the API
 
